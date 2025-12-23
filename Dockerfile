@@ -10,7 +10,7 @@ RUN apt-get update && \
     dpkg-reconfigure --frontend noninteractive tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-# Install common utilities, SSH, and software-properties-common for add-apt-repository
+# Install common utilities, SSH, socat for port forwarding
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       openssh-server \
@@ -20,7 +20,7 @@ RUN apt-get update && \
       nano \
       sudo \
       software-properties-common \
-      netcat-openbsd \
+      socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 3.12
@@ -36,8 +36,8 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN echo "root:${ROOT_PASSWORD}" | chpasswd \
     && mkdir -p /var/run/sshd
 
-# Configure SSH to use port 2222
-RUN echo "Port 2222" > /etc/ssh/sshd_config.d/custom.conf && \
+# Configure SSH to use port 22 internally
+RUN echo "Port 22" > /etc/ssh/sshd_config.d/custom.conf && \
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config.d/custom.conf && \
     echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config.d/custom.conf
 
@@ -47,42 +47,74 @@ RUN echo "Dark" > /etc/hostname
 # Force bash prompt
 RUN echo 'export PS1="root@Dark:\\w# "' >> /root/.bashrc
 
-# Expose both HTTP and SSH ports
-EXPOSE 8080 2222
+# Railway will expose this port
+EXPOSE 8080
 
-# Create a simple HTTP health check server using correct imports
+# Create web interface that shows connection info
 RUN echo '#!/usr/bin/env python3\n\
 from http.server import BaseHTTPRequestHandler, HTTPServer\n\
 import socket\n\
+import os\n\
 \n\
-class HealthCheckHandler(BaseHTTPRequestHandler):\n\
+class InfoHandler(BaseHTTPRequestHandler):\n\
     def do_GET(self):\n\
         if self.path == "/" or self.path == "/health":\n\
+            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "your-app.railway.app")\n\
+            port = os.environ.get("PORT", "8080")\n\
+            \n\
+            # Check if SSH is running\n\
+            ssh_status = "Running"\n\
             try:\n\
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n\
-                sock.settimeout(2)\n\
-                result = sock.connect_ex(("127.0.0.1", 2222))\n\
+                sock.settimeout(1)\n\
+                result = sock.connect_ex(("127.0.0.1", 22))\n\
                 sock.close()\n\
-                if result == 0:\n\
-                    self.send_response(200)\n\
-                    self.send_header("Content-type", "text/html")\n\
-                    self.end_headers()\n\
-                    self.wfile.write(b"<html><body>")\n\
-                    self.wfile.write(b"<h1>SSH Server is Running</h1>")\n\
-                    self.wfile.write(b"<p>Connect via SSH:</p>")\n\
-                    self.wfile.write(b"<pre>ssh root@YOUR_DOMAIN -p 2222</pre>")\n\
-                    self.wfile.write(b"<p>SSH is listening on port 2222</p>")\n\
-                    self.wfile.write(b"</body></html>")\n\
-                else:\n\
-                    self.send_response(503)\n\
-                    self.send_header("Content-type", "text/plain")\n\
-                    self.end_headers()\n\
-                    self.wfile.write(b"SSH service not available")\n\
-            except Exception as e:\n\
-                self.send_response(500)\n\
-                self.send_header("Content-type", "text/plain")\n\
-                self.end_headers()\n\
-                self.wfile.write(f"Error: {str(e)}".encode())\n\
+                if result != 0:\n\
+                    ssh_status = "Not Running"\n\
+            except:\n\
+                ssh_status = "Error"\n\
+            \n\
+            self.send_response(200)\n\
+            self.send_header("Content-type", "text/html")\n\
+            self.end_headers()\n\
+            html = f"""<!DOCTYPE html>\n\
+<html>\n\
+<head>\n\
+    <title>SSH Server - Dark</title>\n\
+    <style>\n\
+        body {{ font-family: monospace; background: #1e1e1e; color: #00ff00; padding: 20px; }}\n\
+        .container {{ max-width: 800px; margin: 0 auto; }}\n\
+        h1 {{ color: #00ff00; }}\n\
+        .status {{ padding: 10px; background: #2d2d2d; border-radius: 5px; margin: 10px 0; }}\n\
+        .command {{ background: #000; padding: 15px; border-radius: 5px; margin: 10px 0; }}\n\
+        .info {{ color: #ffff00; }}\n\
+    </style>\n\
+</head>\n\
+<body>\n\
+    <div class="container">\n\
+        <h1>🖥️ SSH Server Status</h1>\n\
+        <div class="status">\n\
+            <strong>SSH Service:</strong> <span class="info">{ssh_status}</span><br>\n\
+            <strong>Domain:</strong> <span class="info">{domain}</span><br>\n\
+            <strong>Port:</strong> <span class="info">{port}</span>\n\
+        </div>\n\
+        \n\
+        <h2>📡 Connect via SSH:</h2>\n\
+        <div class="command">\n\
+            ssh root@{domain} -p {port}\n\
+        </div>\n\
+        \n\
+        <h2>ℹ️ Connection Info:</h2>\n\
+        <div class="status">\n\
+            <strong>Host:</strong> {domain}<br>\n\
+            <strong>Port:</strong> {port}<br>\n\
+            <strong>Username:</strong> root<br>\n\
+            <strong>Password:</strong> [Set via ROOT_PASSWORD env variable]\n\
+        </div>\n\
+    </div>\n\
+</body>\n\
+</html>"""\n\
+            self.wfile.write(html.encode())\n\
         else:\n\
             self.send_response(404)\n\
             self.end_headers()\n\
@@ -91,35 +123,38 @@ class HealthCheckHandler(BaseHTTPRequestHandler):\n\
         pass\n\
 \n\
 if __name__ == "__main__":\n\
-    server = HTTPServer(("0.0.0.0", 8080), HealthCheckHandler)\n\
-    print("Health check server running on port 8080")\n\
+    port = int(os.environ.get("PORT", "8080"))\n\
+    server = HTTPServer(("0.0.0.0", port), InfoHandler)\n\
+    print(f"Web interface running on port {port}")\n\
     server.serve_forever()\n\
-' > /health_server.py && chmod +x /health_server.py
+' > /web_server.py && chmod +x /web_server.py
 
-# Create startup script
+# Create startup script that forwards Railway's port to SSH
 RUN echo '#!/bin/bash\n\
 set -e\n\
 \n\
-# Kill any existing processes on ports\n\
-fuser -k 8080/tcp 2>/dev/null || true\n\
-fuser -k 2222/tcp 2>/dev/null || true\n\
-sleep 2\n\
+# Get Railway assigned port (defaults to 8080)\n\
+RAILWAY_PORT=${PORT:-8080}\n\
 \n\
 echo "========================================"\n\
-echo "HTTP Health Check: Port 8080"\n\
-echo "SSH Server: Port 2222"\n\
-echo "========================================"\n\
-echo "To connect: ssh root@YOUR_RAILWAY_DOMAIN -p 2222"\n\
+echo "Railway Port: $RAILWAY_PORT"\n\
+echo "SSH internal port: 22"\n\
 echo "========================================"\n\
 \n\
-# Start HTTP health check server in background\n\
-python3 /health_server.py &\n\
+# Start SSH on port 22\n\
+/usr/sbin/sshd\n\
 \n\
-# Wait a moment for health server to start\n\
-sleep 2\n\
+echo "SSH server started on port 22"\n\
 \n\
-# Start SSH daemon in foreground\n\
-exec /usr/sbin/sshd -D -e\n\
+# Start web interface on Railway port for initial connection info\n\
+python3 /web_server.py &\n\
+\n\
+# Give services time to start\n\
+sleep 3\n\
+\n\
+# Forward Railway port to SSH (this is the key!)\n\
+echo "Starting port forwarding: $RAILWAY_PORT -> 22"\n\
+exec socat TCP-LISTEN:$RAILWAY_PORT,fork,reuseaddr TCP:127.0.0.1:22\n\
 ' > /start.sh && chmod +x /start.sh
 
 CMD ["/start.sh"]
