@@ -20,12 +20,14 @@ RUN apt-get update && \
       nano \
       sudo \
       software-properties-common \
+      python3-pip \
+      netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 3.12
 RUN add-apt-repository ppa:deadsnakes/ppa -y && \
     apt-get update && \
-    apt-get install -y --no-install-recommends python3.12 python3.12-venv && \
+    apt-get install -y --no-install-recommends python3.12 python3.12-venv python3.12-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Make python3 point to python3.12
@@ -43,26 +45,80 @@ RUN echo "Dark" > /etc/hostname
 # Force bash prompt
 RUN echo 'export PS1="root@Dark:\\w# "' >> /root/.bashrc
 
-# Railway will automatically assign a PORT environment variable
-EXPOSE 22
+# Expose both HTTP and SSH ports
+EXPOSE 8080 2222
 
-# Create a startup script for Railway
-RUN echo '#!/bin/bash\n\
-# Use Railway'\''s PORT environment variable, fallback to 22 if not set\n\
-SSH_PORT=${PORT:-22}\n\
+# Create a simple HTTP health check server
+RUN echo '#!/usr/bin/env python3\n\
+from http.server import HTTPRequestHandler, HTTPServer\n\
+import socket\n\
 \n\
-# Update SSH config to use the Railway port\n\
+class HealthCheckHandler(HTTPRequestHandler):\n\
+    def do_GET(self):\n\
+        if self.path == "/" or self.path == "/health":\n\
+            # Check if SSH is running on port 2222\n\
+            try:\n\
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n\
+                result = sock.connect_ex(("127.0.0.1", 2222))\n\
+                sock.close()\n\
+                if result == 0:\n\
+                    self.send_response(200)\n\
+                    self.send_header("Content-type", "text/html")\n\
+                    self.end_headers()\n\
+                    self.wfile.write(b"<html><body>")\n\
+                    self.wfile.write(b"<h1>SSH Server is Running</h1>")\n\
+                    self.wfile.write(b"<p>Connect via SSH:</p>")\n\
+                    self.wfile.write(b"<pre>ssh root@YOUR_DOMAIN -p 2222</pre>")\n\
+                    self.wfile.write(b"<p>SSH Port: 2222</p>")\n\
+                    self.wfile.write(b"</body></html>")\n\
+                else:\n\
+                    self.send_response(503)\n\
+                    self.send_header("Content-type", "text/plain")\n\
+                    self.end_headers()\n\
+                    self.wfile.write(b"SSH service not available")\n\
+            except Exception as e:\n\
+                self.send_response(500)\n\
+                self.send_header("Content-type", "text/plain")\n\
+                self.end_headers()\n\
+                self.wfile.write(f"Error: {str(e)}".encode())\n\
+        else:\n\
+            self.send_response(404)\n\
+            self.end_headers()\n\
+    \n\
+    def log_message(self, format, *args):\n\
+        pass  # Suppress HTTP logs\n\
+\n\
+if __name__ == "__main__":\n\
+    server = HTTPServer(("0.0.0.0", 8080), HealthCheckHandler)\n\
+    print("Health check server running on port 8080")\n\
+    server.serve_forever()\n\
+' > /health_server.py && chmod +x /health_server.py
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+\n\
+# Configure SSH to run on port 2222 (not 8080)\n\
+SSH_PORT=2222\n\
 sed -i "s/^#Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config\n\
 sed -i "s/^Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config\n\
 echo "Port $SSH_PORT" >> /etc/ssh/sshd_config\n\
 \n\
 # Display connection info\n\
 echo "========================================"\n\
-echo "SSH Server starting on port: $SSH_PORT"\n\
+echo "HTTP Health Check: Port 8080"\n\
+echo "SSH Server: Port 2222"\n\
 echo "Root password: Set via ROOT_PASSWORD env"\n\
 echo "========================================"\n\
+echo ""\n\
+echo "To connect via SSH:"\n\
+echo "ssh root@YOUR_RAILWAY_DOMAIN -p 2222"\n\
+echo "========================================"\n\
+\n\
+# Start HTTP health check server in background\n\
+python3 /health_server.py &\n\
 \n\
 # Start SSH daemon in foreground\n\
-/usr/sbin/sshd -D -e' > /start.sh && chmod +x /start.sh
+/usr/sbin/sshd -D -e\n\
+' > /start.sh && chmod +x /start.sh
 
 CMD ["/start.sh"]
