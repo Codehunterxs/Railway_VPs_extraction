@@ -35,9 +35,15 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # SSH root password
 RUN echo "root:${ROOT_PASSWORD}" | chpasswd \
-    && mkdir -p /var/run/sshd \
-    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config || true \
-    && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
+    && mkdir -p /var/run/sshd
+
+# Configure SSH properly during build (not at runtime)
+RUN sed -i 's/#Port 22/Port 2222/' /etc/ssh/sshd_config && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    echo "Port 2222" >> /etc/ssh/sshd_config && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
 
 # Optional hostname file
 RUN echo "Dark" > /etc/hostname
@@ -56,7 +62,6 @@ import socket\n\
 class HealthCheckHandler(HTTPRequestHandler):\n\
     def do_GET(self):\n\
         if self.path == "/" or self.path == "/health":\n\
-            # Check if SSH is running on port 2222\n\
             try:\n\
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n\
                 result = sock.connect_ex(("127.0.0.1", 2222))\n\
@@ -69,7 +74,7 @@ class HealthCheckHandler(HTTPRequestHandler):\n\
                     self.wfile.write(b"<h1>SSH Server is Running</h1>")\n\
                     self.wfile.write(b"<p>Connect via SSH:</p>")\n\
                     self.wfile.write(b"<pre>ssh root@YOUR_DOMAIN -p 2222</pre>")\n\
-                    self.wfile.write(b"<p>SSH Port: 2222</p>")\n\
+                    self.wfile.write(b"<p>SSH is listening on port 2222</p>")\n\
                     self.wfile.write(b"</body></html>")\n\
                 else:\n\
                     self.send_response(503)\n\
@@ -86,7 +91,7 @@ class HealthCheckHandler(HTTPRequestHandler):\n\
             self.end_headers()\n\
     \n\
     def log_message(self, format, *args):\n\
-        pass  # Suppress HTTP logs\n\
+        pass\n\
 \n\
 if __name__ == "__main__":\n\
     server = HTTPServer(("0.0.0.0", 8080), HealthCheckHandler)\n\
@@ -94,16 +99,9 @@ if __name__ == "__main__":\n\
     server.serve_forever()\n\
 ' > /health_server.py && chmod +x /health_server.py
 
-# Create startup script
+# Create startup script (simplified - no config modification)
 RUN echo '#!/bin/bash\n\
 \n\
-# Configure SSH to run on port 2222 (not 8080)\n\
-SSH_PORT=2222\n\
-sed -i "s/^#Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config\n\
-sed -i "s/^Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config\n\
-echo "Port $SSH_PORT" >> /etc/ssh/sshd_config\n\
-\n\
-# Display connection info\n\
 echo "========================================"\n\
 echo "HTTP Health Check: Port 8080"\n\
 echo "SSH Server: Port 2222"\n\
