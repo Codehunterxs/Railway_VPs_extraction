@@ -20,7 +20,6 @@ RUN apt-get update && \
       nano \
       sudo \
       software-properties-common \
-      python3-pip \
       netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,13 +36,10 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN echo "root:${ROOT_PASSWORD}" | chpasswd \
     && mkdir -p /var/run/sshd
 
-# Configure SSH properly during build (not at runtime)
-RUN sed -i 's/#Port 22/Port 2222/' /etc/ssh/sshd_config && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
-    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
-    echo "Port 2222" >> /etc/ssh/sshd_config && \
-    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+# Configure SSH to use port 2222
+RUN echo "Port 2222" > /etc/ssh/sshd_config.d/custom.conf && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config.d/custom.conf && \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config.d/custom.conf
 
 # Optional hostname file
 RUN echo "Dark" > /etc/hostname
@@ -54,16 +50,17 @@ RUN echo 'export PS1="root@Dark:\\w# "' >> /root/.bashrc
 # Expose both HTTP and SSH ports
 EXPOSE 8080 2222
 
-# Create a simple HTTP health check server
+# Create a simple HTTP health check server using correct imports
 RUN echo '#!/usr/bin/env python3\n\
-from http.server import HTTPRequestHandler, HTTPServer\n\
+from http.server import BaseHTTPRequestHandler, HTTPServer\n\
 import socket\n\
 \n\
-class HealthCheckHandler(HTTPRequestHandler):\n\
+class HealthCheckHandler(BaseHTTPRequestHandler):\n\
     def do_GET(self):\n\
         if self.path == "/" or self.path == "/health":\n\
             try:\n\
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n\
+                sock.settimeout(2)\n\
                 result = sock.connect_ex(("127.0.0.1", 2222))\n\
                 sock.close()\n\
                 if result == 0:\n\
@@ -99,24 +96,30 @@ if __name__ == "__main__":\n\
     server.serve_forever()\n\
 ' > /health_server.py && chmod +x /health_server.py
 
-# Create startup script (simplified - no config modification)
+# Create startup script
 RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+# Kill any existing processes on ports\n\
+fuser -k 8080/tcp 2>/dev/null || true\n\
+fuser -k 2222/tcp 2>/dev/null || true\n\
+sleep 2\n\
 \n\
 echo "========================================"\n\
 echo "HTTP Health Check: Port 8080"\n\
 echo "SSH Server: Port 2222"\n\
-echo "Root password: Set via ROOT_PASSWORD env"\n\
 echo "========================================"\n\
-echo ""\n\
-echo "To connect via SSH:"\n\
-echo "ssh root@YOUR_RAILWAY_DOMAIN -p 2222"\n\
+echo "To connect: ssh root@YOUR_RAILWAY_DOMAIN -p 2222"\n\
 echo "========================================"\n\
 \n\
 # Start HTTP health check server in background\n\
 python3 /health_server.py &\n\
 \n\
+# Wait a moment for health server to start\n\
+sleep 2\n\
+\n\
 # Start SSH daemon in foreground\n\
-/usr/sbin/sshd -D -e\n\
+exec /usr/sbin/sshd -D -e\n\
 ' > /start.sh && chmod +x /start.sh
 
 CMD ["/start.sh"]
